@@ -1,0 +1,9 @@
+akshare
+pandas
+numpy
+pyarrow
+tqdm
+matplotlib
+openpyxl
+requests
+pytest
