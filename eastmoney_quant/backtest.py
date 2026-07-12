@@ -95,7 +95,9 @@ def _infer_annualization_periods(execution_dates: list[pd.Timestamp]) -> int:
     if len(execution_dates) < 2:
         return 252
     spacing = pd.Series(execution_dates).sort_values().diff().dropna().dt.days.median()
-    return 252 if pd.isna(spacing) or spacing <= 7 else 12
+    if pd.isna(spacing) or spacing <= 4:
+        return 252
+    return max(1, round(365.25 / spacing))
 
 
 def expand_positions(signal: pd.DataFrame, trade_dates: list[pd.Timestamp]) -> pd.DataFrame:

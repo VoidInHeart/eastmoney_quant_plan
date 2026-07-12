@@ -8,7 +8,7 @@ import pandas as pd
 from . import config
 from .factor import build_factors
 from .report import refresh_dashboard_data
-from .signal import build_daily_signal, filter_stock_pool
+from .signal import build_frequency_signal
 
 
 @dataclass
@@ -33,29 +33,21 @@ def load_factor_data(refresh: bool = False) -> pd.DataFrame:
 def build_latest_portfolio(factor_data: pd.DataFrame, top_n: int = config.TOP_N) -> pd.DataFrame:
     """Build the latest strategy portfolio using the most recent trade date."""
     latest_date = pd.to_datetime(factor_data["date"]).max()
-    if config.REBALANCE_FREQUENCY == "daily":
-        controlled_signals = build_daily_signal(
-            factor_data,
-            top_n=top_n,
-            reserve_latest=False,
-        )
-        selected = controlled_signals[controlled_signals["date"] == latest_date].copy()
-        if selected.empty:
-            raise ValueError(f"no tradable stocks passed filters on {latest_date.date()}")
-        latest_factors = factor_data[pd.to_datetime(factor_data["date"]) == latest_date].copy()
-        selected = selected.merge(
-            latest_factors.drop(columns=["name", "score"], errors="ignore"),
-            on=["date", "code"],
-            how="left",
-        )
-    else:
-        daily = factor_data[pd.to_datetime(factor_data["date"]) == latest_date].copy()
-        pool = filter_stock_pool(daily)
-        if pool.empty:
-            raise ValueError(f"no tradable stocks passed filters on {latest_date.date()}")
-        selected = pool.sort_values("score", ascending=False).head(top_n).copy()
-        selected["weight"] = 1 / len(selected)
-        selected["rank"] = range(1, len(selected) + 1)
+    controlled_signals = build_frequency_signal(
+        factor_data,
+        frequency=config.REBALANCE_FREQUENCY,
+        top_n=top_n,
+        reserve_latest=False,
+    )
+    selected = controlled_signals[controlled_signals["date"] == latest_date].copy()
+    if selected.empty:
+        raise ValueError(f"no tradable stocks passed filters on {latest_date.date()}")
+    latest_factors = factor_data[pd.to_datetime(factor_data["date"]) == latest_date].copy()
+    selected = selected.merge(
+        latest_factors.drop(columns=["name", "score"], errors="ignore"),
+        on=["date", "code"],
+        how="left",
+    )
     selected["signal_date"] = latest_date
     cols = [
         "signal_date",

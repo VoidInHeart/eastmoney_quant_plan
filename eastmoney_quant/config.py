@@ -40,11 +40,14 @@ TOP_N = 20
 
 # Daily strategy settings.  Factor data still uses a longer history for
 # lookbacks; only the reported backtest window is limited to one trading year.
-REBALANCE_FREQUENCY = "daily"
+REBALANCE_FREQUENCY = "weekly"
 BACKTEST_TRADING_DAYS = 252
-HOLDING_RANK_BUFFER = 20
-MAX_DAILY_REPLACEMENTS = 4
-MIN_HOLDING_DAYS = 5
+HOLDING_RANK_BUFFER = 50
+MAX_REPLACEMENTS_PER_REBALANCE = 2
+MIN_HOLDING_DAYS = 15
+MIN_SCORE_IMPROVEMENT = 0.05
+POSITION_WEIGHT_METHOD = "equal"  # equal, rank_tilt, or inverse_volatility
+RANK_WEIGHT_BLEND = 0.5
 
 COMMISSION_RATE = 0.0003
 STAMP_TAX_RATE = 0.001

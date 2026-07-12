@@ -2,7 +2,7 @@ import pandas as pd
 
 from eastmoney_quant.backtest import run_backtest
 from eastmoney_quant.prediction import track_logged_predictions
-from eastmoney_quant.signal import build_daily_signal
+from eastmoney_quant.signal import build_daily_signal, build_frequency_signal
 
 
 def _daily_data() -> pd.DataFrame:
@@ -64,3 +64,20 @@ def test_prediction_tracking_matches_zero_padded_stock_codes():
 
     assert len(tracking) == 1
     assert abs(tracking["portfolio_return"].iloc[0] - 0.1) < 1e-12
+
+
+def test_weekly_signal_uses_weekly_annualization_and_normalized_weights():
+    data = _daily_data()
+    signal = build_frequency_signal(
+        data,
+        frequency="weekly",
+        trading_days=30,
+        rank_buffer=50,
+        max_replacements=2,
+        min_holding_days=15,
+        min_score_improvement=0.05,
+    )
+    result = run_backtest(data, signal)
+
+    assert result["performance"]["annualization_periods"] == 52
+    assert signal.groupby("date")["weight"].sum().round(12).eq(1).all()
