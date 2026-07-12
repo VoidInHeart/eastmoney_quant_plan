@@ -12,6 +12,7 @@
 - 每月最后一个交易日选取综合得分最高的股票并等权持有
 - 回测中使用 T 日收盘后信号、T+1 生效，避免直接使用当日成交的未来函数
 - 导出净值曲线、交易记录、绩效指标和净值图
+- 导出全市场等权基准和策略相对基准表现
 
 ## 项目结构
 
@@ -80,10 +81,51 @@ python main.py --force-fetch --codes 000001 600519 000858 --top-n 2
 python main.py --force-fetch --history-source tencent
 ```
 
+腾讯历史源在后复权价格之外，会额外拉取不复权价格来估算成交额，供流动性因子和股票池过滤使用。老缓存不会自动修正成交额口径，如需使用修正后的成交额，需要重新下载：
+
+```bash
+python main.py --force-fetch --history-source tencent
+```
+
 或只下载列表前 N 只：
 
 ```bash
 python main.py --force-fetch --history-source tencent --limit 50
+```
+
+日常更新不要使用 `--force-fetch`。已经有全量缓存后，建议使用安全增量更新：
+
+```bash
+python update_data.py
+```
+
+详细说明见 `docs/README.md`。
+
+## 最新组合预测与跟踪
+
+生成基于最新交易日的策略建议持仓：
+
+```bash
+python predict.py
+```
+
+该命令会输出并保存：
+
+- `data/result/latest_portfolio.csv`：最新建议持仓
+- `data/result/prediction_log.csv`：每次生成的建议记录
+- `data/result/prediction_tracking.csv`：历史建议到当前最新数据的收益跟踪
+- `data/result/prediction_summary.json`：本次预测摘要
+
+每隔几天更新数据并重跑主流程后，可以只查看旧预测的收益跟踪：
+
+```bash
+python predict.py --track-only
+```
+
+如果想重新生成新一期建议并写入日志，直接再次运行：
+
+```bash
+python predict.py
 ```
 
 ## 输出
@@ -94,27 +136,37 @@ python main.py --force-fetch --history-source tencent --limit 50
 - `data/processed/factor_daily.parquet`
 - `data/processed/rebalance_signal.parquet`
 - `data/result/backtest_nav.csv`
+- `data/result/benchmark_nav.csv`
 - `data/result/trades.csv`
 - `data/result/performance.json`
 - `data/result/nav_curve.png`
+- `data/result/latest_portfolio.csv`
+- `data/result/prediction_log.csv`
+- `data/result/prediction_tracking.csv`
+- `data/result/prediction_summary.json`
 
 ## 策略说明
 
 综合得分：
 
 ```text
-score = 0.40 * mom_60_20_z
-      + 0.20 * rev_5_z
-      + 0.25 * vol_20_z
-      + 0.15 * liq_20_z
+score = 0.30 * mom_120_20_rank
+      + 0.20 * trend_120_rank
+      + 0.15 * rev_10_rank
+      + 0.25 * vol_60_rank
+      + 0.10 * drawdown_120_rank
 ```
 
-基础股票池过滤：
+优化版默认过滤条件：
 
 - 剔除 ST 和名称包含“退”的股票
-- 剔除上市不足 120 个交易日的股票
-- 剔除最近 20 日平均成交额低于 1 亿元的股票
+- 剔除上市不足 180 个交易日的股票
+- 剔除最近 20 日平均成交额低于 2000 万元的股票
+- 剔除 120 日趋势过弱、120 日回撤过深的股票
+- 剔除横截面中波动最高的 25% 股票
 - 剔除价格缺失或无效的股票
+
+原始方案中的基础过滤已经升级为上面的防守型过滤组合；如需调整，可修改 `eastmoney_quant/config.py` 中的阈值。
 
 ## 风险提示
 

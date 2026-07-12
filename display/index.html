@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A 股多因子策略看板</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">DAILY MULTI-FACTOR</p>
+          <h1>A 股策略看板</h1>
+          <p class="subtitle">最近约一年 · 日频信号 · T+1 开盘成交 · 成本后收益</p>
+        </div>
+        <div class="update-box">
+          <span>数据更新时间</span>
+          <strong id="generated-at">等待回测结果</strong>
+        </div>
+      </header>
+
+      <section id="metrics" class="metrics" aria-label="策略核心指标"></section>
+
+      <section class="panel chart-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">PERFORMANCE</p>
+            <h2>策略与基准净值</h2>
+          </div>
+          <div class="legend"><span class="strategy-dot"></span>策略 <span class="benchmark-dot"></span>全市场等权基准</div>
+        </div>
+        <div class="chart-wrap"><canvas id="nav-chart" aria-label="策略与基准净值曲线"></canvas></div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">LATEST SIGNAL</p>
+              <h2>最新建议持仓</h2>
+            </div>
+            <span id="portfolio-count" class="pill">0 只</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>得分</th><th>权重</th><th>收盘价</th></tr></thead>
+              <tbody id="portfolio-body"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">RECENT TRADES</p>
+              <h2>最近调仓与成本</h2>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>执行日</th><th>持仓</th><th>换手</th><th>总成本</th></tr></thead>
+              <tbody id="trades-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <p id="empty-state" class="empty-state" hidden></p>
+    </main>
+    <script src="data.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

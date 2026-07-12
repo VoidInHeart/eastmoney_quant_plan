@@ -9,7 +9,7 @@ from eastmoney_quant.data_clean import clean_daily_data, save_clean_data
 from eastmoney_quant.data_fetch import fetch_all_stock_history, make_sample_data
 from eastmoney_quant.factor import build_factors
 from eastmoney_quant.report import export_report
-from eastmoney_quant.signal import build_monthly_signal
+from eastmoney_quant.signal import build_rebalance_signal
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +52,7 @@ def main() -> None:
     factor_data = build_factors(clean_data)
     factor_data.to_parquet(config.FACTOR_DAILY_PATH, index=False)
 
-    signal = build_monthly_signal(factor_data, top_n=args.top_n)
+    signal = build_rebalance_signal(factor_data, top_n=args.top_n)
     signal.to_parquet(config.SIGNAL_PATH, index=False)
 
     result = run_backtest(factor_data, signal)

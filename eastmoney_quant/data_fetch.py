@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 from typing import Iterable
 
@@ -91,6 +92,24 @@ REQUEST_HEADERS = {
     ),
     "Referer": "https://quote.eastmoney.com/",
 }
+
+
+def _timestamp() -> str:
+    return pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _safe_write_parquet(path, df: pd.DataFrame, backup: bool = True) -> None:
+    """Write parquet through a temp file and keep a backup when replacing."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.stem}.tmp_{_timestamp()}{path.suffix}")
+    df.to_parquet(tmp_path, index=False)
+    if path.exists() and backup:
+        backup_dir = path.parent / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"{path.stem}_{_timestamp()}{path.suffix}"
+        shutil.copy2(path, backup_path)
+        LOGGER.info("backup saved to %s", backup_path)
+    os.replace(tmp_path, path)
 
 
 def bypass_proxy_for_eastmoney() -> None:
@@ -242,12 +261,14 @@ def fetch_one_stock_history_tx(
     start_date: str,
     end_date: str,
     adjust: str = "hfq",
+    repair_amount: bool = config.TENCENT_REPAIR_AMOUNT,
 ) -> pd.DataFrame:
     """Fetch one stock's daily history from Tencent through AKShare as a final fallback."""
     ak = _load_akshare()
     code = str(code).zfill(6)
+    symbol = _to_tx_symbol(code)
     df = ak.stock_zh_a_hist_tx(
-        symbol=_to_tx_symbol(code),
+        symbol=symbol,
         start_date=start_date,
         end_date=end_date,
         adjust=adjust if adjust in {"qfq", "hfq", ""} else "",
@@ -257,12 +278,32 @@ def fetch_one_stock_history_tx(
         return df
     df = df.copy()
     df["code"] = code
-    if "volume" not in df.columns and "amount" in df.columns:
-        df["volume"] = pd.to_numeric(df["amount"], errors="coerce")
     if "amount" in df.columns:
-        amount = pd.to_numeric(df["amount"], errors="coerce")
-        close = pd.to_numeric(df["close"], errors="coerce")
-        df["amount"] = amount * close
+        volume_lots = pd.to_numeric(df["amount"], errors="coerce")
+        df["volume"] = volume_lots
+        amount_price = pd.to_numeric(df["close"], errors="coerce")
+        amount_source = "tx_volume_adjusted_close"
+        if adjust and repair_amount:
+            raw_df = ak.stock_zh_a_hist_tx(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust="",
+                timeout=15,
+            )
+            if not raw_df.empty and {"date", "close"}.issubset(raw_df.columns):
+                raw_close = raw_df[["date", "close"]].copy()
+                raw_close["amount_price"] = pd.to_numeric(raw_close["close"], errors="coerce")
+                df = df.merge(raw_close[["date", "amount_price"]], on="date", how="left")
+                amount_price = df["amount_price"].fillna(amount_price)
+                df = df.drop(columns=["amount_price"])
+                amount_source = "tx_volume_unadjusted_close"
+        df["amount"] = volume_lots * amount_price * 100
+        df["amount_source"] = amount_source
+    elif "volume" not in df.columns:
+        df["volume"] = pd.NA
+        df["amount"] = pd.NA
+        df["amount_source"] = "missing"
     return df
 
 
@@ -391,7 +432,7 @@ def fetch_all_stock_history(
     stock_list = fetch_stock_list(prefer_code_name=history_source == "tencent")
     if codes is None and "name" in stock_list.columns:
         name = stock_list["name"].fillna("").astype(str)
-        stock_list = stock_list.loc[~name.str.contains("退", regex=False)].copy()
+        stock_list = stock_list.loc[~name.str.contains("\u9000", regex=False)].copy()
     name_map = stock_list.set_index("code")["name"].to_dict() if "name" in stock_list else {}
     frames: list[pd.DataFrame] = []
     target_codes = _iter_codes(stock_list, codes)
@@ -421,7 +462,14 @@ def fetch_all_stock_history(
         raise RuntimeError("no stock history was fetched")
 
     result = pd.concat(frames, ignore_index=True)
-    result.to_parquet(config.RAW_DAILY_PATH, index=False)
+    fetched_codes = result["code"].astype(str).str.zfill(6).nunique()
+    min_expected_codes = max(1, int(len(target_codes) * 0.8))
+    if config.RAW_DAILY_PATH.exists() and force and fetched_codes < min_expected_codes:
+        raise RuntimeError(
+            "fetched too few codes for a full refresh "
+            f"({fetched_codes}/{len(target_codes)}); old raw cache was not replaced"
+        )
+    _safe_write_parquet(config.RAW_DAILY_PATH, result, backup=force)
     LOGGER.info("saved raw daily data to %s, rows=%s", config.RAW_DAILY_PATH, len(result))
     return result
 
