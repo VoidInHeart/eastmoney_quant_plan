@@ -133,6 +133,7 @@ def run_backtest(
     commission_rate: float = config.COMMISSION_RATE,
     stamp_tax_rate: float = config.STAMP_TAX_RATE,
     slippage_rate: float = config.SLIPPAGE_RATE,
+    annualization_periods: float | None = None,
 ) -> dict[str, pd.DataFrame | dict[str, float]]:
     """Simulate T+1-open execution and open-to-open holding returns.
 
@@ -147,12 +148,8 @@ def run_backtest(
     if missing:
         raise ValueError(f"daily_data missing columns required for open execution: {sorted(missing)}")
 
-    prices = daily_data[["date", "code", "open"]].copy()
-    prices["date"] = pd.to_datetime(prices["date"])
-    prices["code"] = prices["code"].astype(str)
-    prices["open"] = pd.to_numeric(prices["open"], errors="coerce")
-    prices = prices.dropna(subset=["date", "code", "open"])
-    trade_dates = sorted(prices["date"].unique())
+    all_dates = pd.to_datetime(daily_data["date"], errors="coerce")
+    trade_dates = sorted(pd.Series(all_dates).dropna().unique())
 
     prepared_signal = signal.copy()
     prepared_signal["date"] = pd.to_datetime(prepared_signal["date"])
@@ -162,7 +159,12 @@ def run_backtest(
         raise ValueError("at least two executable signals are required for a completed holding period")
 
     execution_dates = [item["execution_date"] for item in plan]
-    open_prices = prices[prices["date"].isin(execution_dates)].pivot_table(
+    prices = daily_data.loc[all_dates.isin(execution_dates), ["date", "code", "open"]].copy()
+    prices["date"] = pd.to_datetime(prices["date"])
+    prices["code"] = prices["code"].astype(str)
+    prices["open"] = pd.to_numeric(prices["open"], errors="coerce")
+    prices = prices.dropna(subset=["date", "code", "open"])
+    open_prices = prices.pivot_table(
         index="date", columns="code", values="open", aggfunc="last"
     )
 
@@ -214,7 +216,8 @@ def run_backtest(
     nav_df = pd.DataFrame(nav_records)
     trades_df = pd.DataFrame(trades)
     benchmark_df = build_equal_weight_benchmark(open_prices, periods)
-    annualization_periods = _infer_annualization_periods(execution_dates)
+    inferred_annualization = _infer_annualization_periods(execution_dates)
+    annualization_periods = annualization_periods or inferred_annualization
     strategy_perf = calc_performance(nav_df, trades_df, annualization_periods=annualization_periods)
     benchmark_perf = calc_performance(
         benchmark_df,

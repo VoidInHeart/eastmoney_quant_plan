@@ -69,11 +69,34 @@ def get_frequency_rebalance_dates(
     return sorted(selected_dates)
 
 
+def get_interval_rebalance_dates(
+    df: pd.DataFrame,
+    interval_days: int,
+    trading_days: int = config.BACKTEST_TRADING_DAYS,
+    reserve_latest: bool = True,
+) -> list[pd.Timestamp]:
+    """Return signal dates spaced by an exact number of trading days."""
+    if interval_days <= 0:
+        raise ValueError("interval_days must be positive")
+    dates = pd.Series(pd.to_datetime(df["date"].dropna().unique())).sort_values()
+    usable_dates = dates.iloc[:-1] if reserve_latest else dates
+    if usable_dates.empty:
+        return []
+    window = usable_dates.iloc[-(trading_days + 1) :]
+    selected_dates = list(window.iloc[::interval_days])
+    terminal_date = window.iloc[-1]
+    if terminal_date not in selected_dates:
+        selected_dates.append(terminal_date)
+    return sorted(selected_dates)
+
+
 def filter_stock_pool(
     df: pd.DataFrame,
     min_listing_days: int = config.MIN_LISTING_DAYS,
     min_amount_ma20: float = config.MIN_AMOUNT_MA20,
     max_vol_quantile: float | None = config.MAX_VOL_QUANTILE,
+    min_trend_120: float | None = config.MIN_TREND_120,
+    min_drawdown_120: float | None = config.MIN_DRAWDOWN_120,
 ) -> pd.DataFrame:
     """Apply tradability and risk filters before ranking stocks."""
     result = df.copy()
@@ -89,10 +112,10 @@ def filter_stock_pool(
         & ~name.str.upper().str.contains("ST", regex=False)
         & ~name.str.contains("\u9000", regex=False)
     )
-    if "trend_120" in result.columns:
-        mask &= result["trend_120"].notna() & (result["trend_120"] > config.MIN_TREND_120)
-    if "drawdown_120" in result.columns:
-        mask &= result["drawdown_120"].notna() & (result["drawdown_120"] > config.MIN_DRAWDOWN_120)
+    if min_trend_120 is not None and "trend_120" in result.columns:
+        mask &= result["trend_120"].notna() & (result["trend_120"] > min_trend_120)
+    if min_drawdown_120 is not None and "drawdown_120" in result.columns:
+        mask &= result["drawdown_120"].notna() & (result["drawdown_120"] > min_drawdown_120)
     if max_vol_quantile is not None and "vol_60" in result.columns:
         vol_cut = result["vol_60"].quantile(max_vol_quantile)
         mask &= result["vol_60"].notna() & (result["vol_60"] >= vol_cut)
@@ -151,7 +174,7 @@ def _build_controlled_selection(
     rank_buffer: int,
     max_replacements: int,
     min_holding_days: int,
-    min_score_improvement: float,
+    min_score_improvement: float | None,
     position_weight_method: str,
     rank_weight_blend: float,
 ) -> tuple[pd.DataFrame, list[str], dict[str, int]]:
@@ -183,7 +206,10 @@ def _build_controlled_selection(
             if replacements >= max_replacements or not removable:
                 break
             incumbent = removable[0]
-            if score_by_code[candidate] < score_by_code[incumbent] + min_score_improvement:
+            if (
+                min_score_improvement is not None
+                and score_by_code[candidate] < score_by_code[incumbent] + min_score_improvement
+            ):
                 break
             selected[selected.index(incumbent)] = candidate
             removable.pop(0)
@@ -208,26 +234,19 @@ def _build_controlled_selection(
     return selected_frame, selected, next_holding_ages
 
 
-def build_frequency_signal(
+def _build_signal_for_dates(
     df: pd.DataFrame,
-    frequency: str,
+    rebalance_dates: list[pd.Timestamp],
     top_n: int = config.TOP_N,
-    trading_days: int = config.BACKTEST_TRADING_DAYS,
     rank_buffer: int = config.HOLDING_RANK_BUFFER,
     max_replacements: int = config.MAX_REPLACEMENTS_PER_REBALANCE,
     min_holding_days: int = config.MIN_HOLDING_DAYS,
-    min_score_improvement: float = config.MIN_SCORE_IMPROVEMENT,
+    min_score_improvement: float | None = config.MIN_SCORE_IMPROVEMENT,
     position_weight_method: str = config.POSITION_WEIGHT_METHOD,
     rank_weight_blend: float = config.RANK_WEIGHT_BLEND,
-    reserve_latest: bool = True,
+    pool_filter_overrides: dict[str, object] | None = None,
 ) -> pd.DataFrame:
-    """Build a recent controlled signal for any supported rebalance frequency."""
-    rebalance_dates = get_frequency_rebalance_dates(
-        df,
-        frequency=frequency,
-        trading_days=trading_days,
-        reserve_latest=reserve_latest,
-    )
+    """Build a controlled signal using an already selected rebalance calendar."""
     all_dates = pd.Series(pd.to_datetime(df["date"].dropna().unique())).sort_values().tolist()
     date_positions = {date: index for index, date in enumerate(all_dates)}
     frames: list[pd.DataFrame] = []
@@ -239,7 +258,7 @@ def build_frequency_signal(
             elapsed_days = max(1, date_positions[date] - date_positions[previous_date])
             holding_ages = {code: age + elapsed_days for code, age in holding_ages.items()}
         daily = df[df["date"] == date]
-        pool = filter_stock_pool(daily)
+        pool = filter_stock_pool(daily, **(pool_filter_overrides or {}))
         if pool.empty:
             continue
         selected, previous_codes, holding_ages = _build_controlled_selection(
@@ -262,6 +281,76 @@ def build_frequency_signal(
     return pd.concat(frames, ignore_index=True).sort_values(["date", "rank"]).reset_index(drop=True)
 
 
+def build_frequency_signal(
+    df: pd.DataFrame,
+    frequency: str,
+    top_n: int = config.TOP_N,
+    trading_days: int = config.BACKTEST_TRADING_DAYS,
+    rank_buffer: int = config.HOLDING_RANK_BUFFER,
+    max_replacements: int = config.MAX_REPLACEMENTS_PER_REBALANCE,
+    min_holding_days: int = config.MIN_HOLDING_DAYS,
+    min_score_improvement: float | None = config.MIN_SCORE_IMPROVEMENT,
+    position_weight_method: str = config.POSITION_WEIGHT_METHOD,
+    rank_weight_blend: float = config.RANK_WEIGHT_BLEND,
+    reserve_latest: bool = True,
+    pool_filter_overrides: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    """Build a recent controlled signal for any calendar-based frequency."""
+    rebalance_dates = get_frequency_rebalance_dates(
+        df,
+        frequency=frequency,
+        trading_days=trading_days,
+        reserve_latest=reserve_latest,
+    )
+    return _build_signal_for_dates(
+        df,
+        rebalance_dates=rebalance_dates,
+        top_n=top_n,
+        rank_buffer=rank_buffer,
+        max_replacements=max_replacements,
+        min_holding_days=min_holding_days,
+        min_score_improvement=min_score_improvement,
+        position_weight_method=position_weight_method,
+        rank_weight_blend=rank_weight_blend,
+        pool_filter_overrides=pool_filter_overrides,
+    )
+
+
+def build_interval_signal(
+    df: pd.DataFrame,
+    interval_days: int,
+    top_n: int = config.TOP_N,
+    trading_days: int = config.BACKTEST_TRADING_DAYS,
+    rank_buffer: int = config.HOLDING_RANK_BUFFER,
+    max_replacements: int = config.MAX_REPLACEMENTS_PER_REBALANCE,
+    min_holding_days: int = config.MIN_HOLDING_DAYS,
+    min_score_improvement: float | None = config.MIN_SCORE_IMPROVEMENT,
+    position_weight_method: str = config.POSITION_WEIGHT_METHOD,
+    rank_weight_blend: float = config.RANK_WEIGHT_BLEND,
+    reserve_latest: bool = True,
+    pool_filter_overrides: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    """Build a controlled signal rebalanced every N trading days."""
+    rebalance_dates = get_interval_rebalance_dates(
+        df,
+        interval_days=interval_days,
+        trading_days=trading_days,
+        reserve_latest=reserve_latest,
+    )
+    return _build_signal_for_dates(
+        df,
+        rebalance_dates=rebalance_dates,
+        top_n=top_n,
+        rank_buffer=rank_buffer,
+        max_replacements=max_replacements,
+        min_holding_days=min_holding_days,
+        min_score_improvement=min_score_improvement,
+        position_weight_method=position_weight_method,
+        rank_weight_blend=rank_weight_blend,
+        pool_filter_overrides=pool_filter_overrides,
+    )
+
+
 def build_daily_signal(
     df: pd.DataFrame,
     top_n: int = config.TOP_N,
@@ -269,10 +358,11 @@ def build_daily_signal(
     rank_buffer: int = config.HOLDING_RANK_BUFFER,
     max_replacements: int = config.MAX_REPLACEMENTS_PER_REBALANCE,
     min_holding_days: int = config.MIN_HOLDING_DAYS,
-    min_score_improvement: float = config.MIN_SCORE_IMPROVEMENT,
+    min_score_improvement: float | None = config.MIN_SCORE_IMPROVEMENT,
     position_weight_method: str = config.POSITION_WEIGHT_METHOD,
     rank_weight_blend: float = config.RANK_WEIGHT_BLEND,
     reserve_latest: bool = True,
+    pool_filter_overrides: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     """Build a recent daily signal with rank buffering and bounded turnover."""
     return build_frequency_signal(
@@ -287,6 +377,7 @@ def build_daily_signal(
         position_weight_method=position_weight_method,
         rank_weight_blend=rank_weight_blend,
         reserve_latest=reserve_latest,
+        pool_filter_overrides=pool_filter_overrides,
     )
 
 

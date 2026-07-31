@@ -7,9 +7,17 @@ RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 RESULT_DIR = DATA_DIR / "result"
 DISPLAY_DIR = ROOT_DIR / "display"
+METADATA_DIR = RAW_DIR / "metadata"
 
 SPOT_CACHE_PATH = RAW_DIR / "spot_latest.parquet"
 RAW_DAILY_PATH = RAW_DIR / "a_share_daily_hfq.parquet"
+DELISTING_PATH = METADATA_DIR / "delisting_registry.parquet"
+SUSPENSION_PATH = METADATA_DIR / "suspension_events.parquet"
+SUSPENSION_FETCH_LOG_PATH = METADATA_DIR / "suspension_fetch_log.parquet"
+INDUSTRY_CHANGE_PATH = METADATA_DIR / "industry_changes_cninfo.parquet"
+SHARE_CHANGE_PATH = METADATA_DIR / "share_changes_cninfo.parquet"
+INDUSTRY_FETCH_LOG_PATH = METADATA_DIR / "industry_fetch_log.parquet"
+SHARE_FETCH_LOG_PATH = METADATA_DIR / "share_fetch_log.parquet"
 CLEAN_DAILY_PATH = PROCESSED_DIR / "clean_daily.parquet"
 FACTOR_DAILY_PATH = PROCESSED_DIR / "factor_daily.parquet"
 SIGNAL_PATH = PROCESSED_DIR / "rebalance_signal.parquet"
@@ -60,5 +68,5 @@ MAX_FETCH_RETRY = 3
 
 def ensure_directories() -> None:
     """Create project data directories if they do not exist."""
-    for path in (RAW_DIR, PROCESSED_DIR, RESULT_DIR):
+    for path in (RAW_DIR, PROCESSED_DIR, RESULT_DIR, METADATA_DIR):
         path.mkdir(parents=True, exist_ok=True)

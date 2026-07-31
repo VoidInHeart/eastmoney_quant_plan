@@ -2,7 +2,7 @@ import pandas as pd
 
 from eastmoney_quant.backtest import run_backtest
 from eastmoney_quant.prediction import track_logged_predictions
-from eastmoney_quant.signal import build_daily_signal, build_frequency_signal
+from eastmoney_quant.signal import build_daily_signal, build_frequency_signal, build_interval_signal
 
 
 def _daily_data() -> pd.DataFrame:
@@ -81,3 +81,20 @@ def test_weekly_signal_uses_weekly_annualization_and_normalized_weights():
 
     assert result["performance"]["annualization_periods"] == 52
     assert signal.groupby("date")["weight"].sum().round(12).eq(1).all()
+
+
+def test_interval_signal_respects_trading_day_spacing():
+    data = _daily_data()
+    signal = build_interval_signal(
+        data,
+        interval_days=5,
+        trading_days=30,
+        rank_buffer=50,
+        max_replacements=2,
+        min_holding_days=15,
+        min_score_improvement=0.05,
+    )
+    result = run_backtest(data, signal, annualization_periods=252 / 5)
+
+    assert signal["date"].nunique() >= 6
+    assert result["performance"]["annualization_periods"] == 252 / 5

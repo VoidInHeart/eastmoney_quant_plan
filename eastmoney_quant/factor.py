@@ -43,6 +43,43 @@ def build_factors(df: pd.DataFrame) -> pd.DataFrame:
     return build_score(cross_sectional_rank_score(result, FACTOR_COLS))
 
 
+def build_windowed_factors(
+    df: pd.DataFrame,
+    momentum_lookback: int = 120,
+    momentum_skip: int = 20,
+    trend_window: int = 120,
+    reversal_window: int = 10,
+    volatility_window: int = 60,
+    drawdown_window: int = 120,
+) -> pd.DataFrame:
+    """Build the production score with alternate lookback windows for validation.
+
+    Output column names remain stable so the same filters, signal builder and
+    backtest can be used for sensitivity checks without special-case code.
+    """
+    result = add_basic_returns(df)
+    by_code = result.groupby("code", group_keys=False)
+    result["mom_120_20"] = by_code["close"].transform(
+        lambda series: series.shift(momentum_skip) / series.shift(momentum_lookback) - 1
+    )
+    result["rev_10"] = by_code["close"].transform(
+        lambda series: -(series / series.shift(reversal_window) - 1)
+    )
+    result["vol_60"] = -by_code["ret"].transform(
+        lambda series: series.rolling(volatility_window, min_periods=volatility_window).std()
+    )
+    ma = by_code["close"].transform(lambda series: series.rolling(trend_window, min_periods=trend_window).mean())
+    high = by_code["close"].transform(
+        lambda series: series.rolling(drawdown_window, min_periods=drawdown_window).max()
+    )
+    result["amount_ma20"] = by_code["amount"].transform(lambda series: series.rolling(20, min_periods=20).mean())
+    result["liq_20"] = np.log(result["amount_ma20"].where(result["amount_ma20"] > 0))
+    result["trend_120"] = result["close"] / ma - 1
+    result["drawdown_120"] = result["close"] / high - 1
+    result["listing_days"] = by_code.cumcount() + 1
+    return build_score(cross_sectional_rank_score(result, FACTOR_COLS))
+
+
 def _zscore(s: pd.Series) -> pd.Series:
     std = s.std(ddof=0)
     if pd.isna(std) or std == 0:
