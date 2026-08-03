@@ -1,0 +1,16 @@
+.trading-shell { padding-bottom: 48px; }
+.route-tabs { display: flex; gap: 10px; margin: 22px 0; flex-wrap: wrap; }
+.route-tabs a, .primary-button, .secondary-button { border-radius: 10px; padding: 10px 14px; font: inherit; font-size: 14px; text-decoration: none; cursor: pointer; }
+.route-tabs a, .secondary-button { color: var(--muted); border: 1px solid var(--line); background: var(--panel); }
+.route-tabs a.active { color: var(--accent); border-color: rgba(98,216,180,.65); background: rgba(98,216,180,.10); }
+.primary-button { color: #061118; border: 1px solid var(--accent); background: var(--accent); font-weight: 700; }
+.secondary-button:disabled { cursor: not-allowed; opacity: .45; }
+.route-page { display: grid; gap: 20px; }
+.route-note { margin: 0 18px 18px; color: var(--muted); line-height: 1.55; }
+.open-price-input, .current-price-input { width: 110px; color: var(--text); background: rgba(3, 8, 20, .55); border: 1px solid var(--line); border-radius: 7px; padding: 7px 8px; font: inherit; }
+.route-actions { display: flex; gap: 10px; padding: 0 18px 18px; flex-wrap: wrap; }
+.route-status { min-height: 22px; margin: 0 18px 18px; color: var(--muted); }
+.route-status.error { color: #ff8b8b; }
+.route-status.success { color: var(--accent); }
+.pnl-summary { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 18px 18px; color: var(--muted); }
+.pnl-summary strong { color: var(--text); margin-left: 6px; }

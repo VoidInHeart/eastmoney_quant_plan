@@ -12,7 +12,11 @@ from eastmoney_quant.update import infer_update_window, safe_incremental_update
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safely update existing raw A-share cache")
     parser.add_argument("--lookback-days", type=int, default=15, help="refetch recent calendar days and merge")
-    parser.add_argument("--end-date", default=None, help="end date in YYYYMMDD; default is today")
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="end date in YYYYMMDD; default is the latest completed A-share trading day",
+    )
     parser.add_argument(
         "--history-source",
         choices=["auto", "eastmoney", "tencent"],
@@ -21,10 +25,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--codes", nargs="*", default=None, help="update only these stock codes")
     parser.add_argument("--limit", type=int, default=None, help="update only the first N codes for a quick check")
+    parser.add_argument("--workers", type=int, default=1, help="bounded concurrent history requests; default is 1")
+    parser.add_argument("--batch-size", type=int, default=250, help="codes per resumable on-disk fetch batch")
     parser.add_argument("--no-backup", action="store_true", help="do not copy the old raw cache before replacing")
     parser.add_argument("--no-rebuild", action="store_true", help="only update raw cache; skip factors/backtest/report")
     parser.add_argument("--no-predict", action="store_true", help="do not append a new prediction after rebuild")
-    parser.add_argument("--top-n", type=int, default=config.TOP_N, help="portfolio size for rebuild/prediction")
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=config.LIVE_MAX_HOLDINGS,
+        help="maximum live holdings (5--10); actual count follows market breadth",
+    )
     parser.add_argument("--dry-run", action="store_true", help="show update window and code count without downloading")
     return parser.parse_args()
 
@@ -55,6 +66,8 @@ def main() -> None:
         rebuild=not args.no_rebuild,
         run_predict=not args.no_predict,
         top_n=args.top_n,
+        workers=args.workers,
+        batch_size=args.batch_size,
     )
     print("Safe update completed.")
     print(f"Raw rows: {result.old_rows} -> {result.merged_rows}")

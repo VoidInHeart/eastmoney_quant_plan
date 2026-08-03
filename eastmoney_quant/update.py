@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -13,12 +14,13 @@ import pandas as pd
 
 from . import config
 from .backtest import run_backtest
-from .data_clean import clean_daily_data, save_clean_data
+from .data_clean import STANDARD_COLUMNS, clean_daily_data, normalize_columns, save_clean_data
 from .data_fetch import fetch_one_stock_history
 from .factor import build_factors
 from .prediction import run_prediction
 from .report import export_report
 from .signal import build_rebalance_signal
+from .trading_calendar import latest_completed_a_share_trading_day
 
 
 LOGGER = logging.getLogger(__name__)
@@ -63,7 +65,9 @@ def safe_replace_parquet(path: Path, data: pd.DataFrame, backup: bool = True) ->
 
 
 def _ensure_date_code(df: pd.DataFrame) -> pd.DataFrame:
-    result = df.copy()
+    # A fallback source may return Chinese headers and numeric values as strings.
+    # Normalise before merging so Parquet sees one stable schema across updates.
+    result = normalize_columns(df)
     result = result.loc[:, ~result.columns.duplicated(keep="last")]
     rename_map = {}
     if "date" not in result.columns and "日期" in result.columns:
@@ -76,6 +80,10 @@ def _ensure_date_code(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("raw data must include date/code columns")
     result["date"] = pd.to_datetime(result["date"], errors="coerce")
     result["code"] = result["code"].astype(str).str.extract(r"(\d{1,6})", expand=False).str.zfill(6)
+    for column in STANDARD_COLUMNS:
+        if column in {"date", "code", "name"} or column not in result.columns:
+            continue
+        result[column] = pd.to_numeric(result[column], errors="coerce")
     result = result.dropna(subset=["date", "code"])
     return result
 
@@ -97,11 +105,25 @@ def merge_raw_data(old_raw: pd.DataFrame, new_raw: pd.DataFrame) -> pd.DataFrame
     return merged
 
 
-def infer_update_window(raw: pd.DataFrame, lookback_days: int, end_date: str | None = None) -> tuple[str, str]:
+def infer_update_window(
+    raw: pd.DataFrame,
+    lookback_days: int,
+    end_date: str | None = None,
+    *,
+    as_of: pd.Timestamp | str | None = None,
+    calendar: Iterable[object] | None = None,
+) -> tuple[str, str]:
+    """Choose a refetch window ending at a completed A-share trading session."""
     prepared = _ensure_date_code(raw)
     latest = prepared["date"].max()
     start = latest - pd.Timedelta(days=lookback_days)
-    end = pd.Timestamp.today() if end_date is None else pd.to_datetime(end_date)
+    if end_date is None:
+        end = latest_completed_a_share_trading_day(as_of=as_of, calendar=calendar)
+    else:
+        # An explicit date is still normalised to the preceding valid session,
+        # so a weekend or exchange holiday cannot become a misleading target.
+        requested = pd.Timestamp(end_date).normalize() + pd.Timedelta(hours=16)
+        end = latest_completed_a_share_trading_day(as_of=requested, calendar=calendar)
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
@@ -123,12 +145,16 @@ def fetch_incremental_history(
     name_map: dict[str, str] | None = None,
     sleep_seconds: float = config.FETCH_SLEEP_SECONDS,
     max_retry: int = config.MAX_FETCH_RETRY,
+    workers: int = 1,
 ) -> tuple[pd.DataFrame, list[str]]:
+    """Fetch recent history with bounded concurrency and deterministic output order."""
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
     frames: list[pd.DataFrame] = []
     skipped: list[str] = []
     name_map = name_map or {}
     codes = [str(code).zfill(6) for code in codes]
-    for index, code in enumerate(codes, start=1):
+    def fetch_one(index: int, code: str) -> tuple[int, str, pd.DataFrame | None, Exception | None]:
         last_error: Exception | None = None
         for attempt in range(1, max_retry + 1):
             try:
@@ -144,40 +170,54 @@ def fetch_incremental_history(
                     df["code"] = code
                     if "name" not in df.columns:
                         df["name"] = name_map.get(code, "")
-                    frames.append(df)
-                break
+                time.sleep(sleep_seconds)
+                return index, code, df, None
             except Exception as exc:  # pragma: no cover - network/API instability
                 last_error = exc
                 LOGGER.warning("update fetch failed for %s attempt %s: %s", code, attempt, exc)
                 time.sleep(sleep_seconds * attempt)
-        else:
+        return index, code, None, last_error
+
+    completed: list[tuple[int, str, pd.DataFrame | None, Exception | None]] = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="history-update") as executor:
+        futures = [executor.submit(fetch_one, index, code) for index, code in enumerate(codes, start=1)]
+        for count, future in enumerate(as_completed(futures), start=1):
+            completed.append(future.result())
+            if count % 50 == 0:
+                LOGGER.info("updated %s/%s codes", count, len(codes))
+
+    for _, code, df, last_error in sorted(completed):
+        if df is not None and not df.empty:
+            frames.append(df)
+        elif last_error is not None:
             skipped.append(code)
             LOGGER.error("skip %s after retries: %s", code, last_error)
-
-        if index % 50 == 0:
-            LOGGER.info("updated %s/%s codes", index, len(codes))
-        time.sleep(sleep_seconds)
 
     if not frames:
         return pd.DataFrame(), skipped
     return pd.concat(frames, ignore_index=True), skipped
 
 
-def rebuild_outputs(raw_data: pd.DataFrame, top_n: int = config.TOP_N, run_predict: bool = True) -> None:
+def rebuild_outputs(
+    raw_data: pd.DataFrame,
+    live_max_holdings: int = config.LIVE_MAX_HOLDINGS,
+    run_predict: bool = True,
+) -> None:
+    """Rebuild the fixed Top20 research baseline and the separate live order list."""
     clean_data = clean_daily_data(raw_data)
     save_clean_data(clean_data)
 
     factor_data = build_factors(clean_data)
     factor_data.to_parquet(config.FACTOR_DAILY_PATH, index=False)
 
-    signal = build_rebalance_signal(factor_data, top_n=top_n)
+    signal = build_rebalance_signal(factor_data, top_n=config.TOP_N)
     signal.to_parquet(config.SIGNAL_PATH, index=False)
 
     result = run_backtest(factor_data, signal)
     export_report(result)
 
     if run_predict:
-        run_prediction(top_n=top_n, refresh_factors=False, append_log=True)
+        run_prediction(top_n=live_max_holdings, refresh_factors=False, append_log=True)
 
 
 def safe_incremental_update(
@@ -190,7 +230,9 @@ def safe_incremental_update(
     backup: bool = True,
     rebuild: bool = True,
     run_predict: bool = True,
-    top_n: int = config.TOP_N,
+    top_n: int = config.LIVE_MAX_HOLDINGS,
+    workers: int = 1,
+    batch_size: int = 250,
 ) -> SafeUpdateResult:
     """Safely append recent history into the existing raw cache."""
     if not raw_path.exists():
@@ -202,6 +244,8 @@ def safe_incremental_update(
     target_codes = [str(code).zfill(6) for code in codes] if codes is not None else sorted(old_prepared["code"].unique())
     if limit is not None:
         target_codes = target_codes[:limit]
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
 
     LOGGER.info(
         "safe update window: %s -> %s, codes=%s, source=%s",
@@ -210,13 +254,39 @@ def safe_incremental_update(
         len(target_codes),
         history_source,
     )
-    new_raw, skipped = fetch_incremental_history(
-        codes=target_codes,
-        start_date=start_date,
-        end_date=final_end_date,
-        history_source=history_source,
-        name_map=_name_map(old_raw),
-    )
+    # Persist completed code batches.  This lets a long update resume without
+    # downloading already-fetched symbols after a terminal or network failure.
+    batch_dir = raw_path.parent / "incremental_batches" / f"{start_date}_{final_end_date}_{history_source}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    name_map = _name_map(old_raw)
+    batch_frames: list[pd.DataFrame] = []
+    skipped: list[str] = []
+    for batch_start in range(0, len(target_codes), batch_size):
+        batch_index = batch_start // batch_size
+        batch_codes = target_codes[batch_start : batch_start + batch_size]
+        batch_path = batch_dir / f"batch_{batch_index:04d}.parquet"
+        if batch_path.exists():
+            batch_frames.append(pd.read_parquet(batch_path))
+            LOGGER.info("reusing completed batch %s (%s codes)", batch_index + 1, len(batch_codes))
+            continue
+        batch_raw, batch_skipped = fetch_incremental_history(
+            codes=batch_codes,
+            start_date=start_date,
+            end_date=final_end_date,
+            history_source=history_source,
+            name_map=name_map,
+            workers=workers,
+        )
+        skipped.extend(batch_skipped)
+        if batch_raw.empty:
+            raise RuntimeError(f"incremental batch {batch_index + 1} returned no data; raw cache was not changed")
+        tmp_batch_path = batch_path.with_name(f"{batch_path.stem}.tmp_{_timestamp()}{batch_path.suffix}")
+        batch_raw.to_parquet(tmp_batch_path, index=False)
+        os.replace(tmp_batch_path, batch_path)
+        batch_frames.append(batch_raw)
+        LOGGER.info("saved completed batch %s (%s codes)", batch_index + 1, len(batch_codes))
+
+    new_raw = pd.concat(batch_frames, ignore_index=True) if batch_frames else pd.DataFrame()
     if new_raw.empty:
         raise RuntimeError("no incremental data was fetched; raw cache was not changed")
 
@@ -227,7 +297,7 @@ def safe_incremental_update(
         LOGGER.info("backup saved to %s", backup_path)
 
     if rebuild:
-        rebuild_outputs(merged, top_n=top_n, run_predict=run_predict)
+        rebuild_outputs(merged, live_max_holdings=top_n, run_predict=run_predict)
 
     result = SafeUpdateResult(
         old_rows=len(old_raw),

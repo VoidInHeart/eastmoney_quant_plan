@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Initial-build trading workflow</title>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="trading.css" />
+  </head>
+  <body>
+    <main class="shell trading-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">INITIAL BUILD WORKFLOW</p>
+          <h1>空仓首次建仓</h1>
+          <p class="subtitle">每日预筛选 → 填开盘价 → 查看持股盈亏</p>
+        </div>
+        <div class="update-box">
+          <span>数据快照</span>
+          <strong id="workflow-generated-at">等待预筛选数据</strong>
+        </div>
+      </header>
+
+      <nav class="route-tabs" aria-label="首次建仓流程">
+        <a href="#prescreen" data-route-link="prescreen">1. 每日预筛选</a>
+        <a href="#opening-prices" data-route-link="opening-prices">2. 填开盘价</a>
+        <a href="#holdings" data-route-link="holdings">3. 持股盈亏</a>
+      </nav>
+
+      <section id="route-prescreen" class="route-page" data-route-page="prescreen">
+        <div class="panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">DAILY TOP 20</p>
+              <h2>收盘后预筛选</h2>
+            </div>
+            <span id="prescreen-meta" class="pill">--</span>
+          </div>
+          <p class="route-note">这是开盘前的候选池，不是买入指令。开盘价录入后，系统会跳过高开超过 3% 的股票，并从排名靠前的候选中选出 5–10 只。</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>得分</th><th>前收</th><th>趋势</th></tr></thead>
+              <tbody id="prescreen-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="route-opening-prices" class="route-page" data-route-page="opening-prices" hidden>
+        <div class="panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">OPENING PRICES</p>
+              <h2>录入今天开盘价并生成订单</h2>
+            </div>
+            <button id="download-open-prices" class="secondary-button" type="button">下载开盘价 CSV</button>
+          </div>
+          <p class="route-note">请填完全部 20 只候选的实际开盘价。页面会按 20 万元、100 股整手和限价保护计算；浏览器结果与命令行订单规则一致。</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>前收</th><th>开盘价</th></tr></thead>
+              <tbody id="opening-input-body"></tbody>
+            </table>
+          </div>
+          <div class="route-actions">
+            <button id="generate-orders" class="primary-button" type="button">生成建仓推荐</button>
+            <button id="download-orders" class="secondary-button" type="button" disabled>下载订单 CSV</button>
+          </div>
+          <p id="order-status" class="route-status" role="status"></p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-heading compact"><div><p class="eyebrow">ORDER RESULT</p><h2>建议订单</h2></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>代码</th><th>名称</th><th>开盘价</th><th>建议限价</th><th>数量</th><th>预计成本</th></tr></thead>
+              <tbody id="order-result-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="route-holdings" class="route-page" data-route-page="holdings" hidden>
+        <div class="panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">HOLDINGS P&amp;L</p>
+              <h2>录入当前价查看浮动盈亏</h2>
+            </div>
+            <button id="update-pnl" class="primary-button" type="button">更新盈亏</button>
+          </div>
+          <p class="route-note">当前价需要手动填写；实时行情接口恢复后可再接入自动刷新。订单和当前价仅保存在本浏览器。</p>
+          <div id="pnl-summary" class="pnl-summary"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>代码</th><th>名称</th><th>持仓数量</th><th>成本</th><th>当前价</th><th>市值</th><th>浮动盈亏</th></tr></thead>
+              <tbody id="holdings-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script src="data.js"></script>
+    <script src="trading.js"></script>
+  </body>
+</html>

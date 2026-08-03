@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import time
 from typing import Iterable
@@ -84,6 +85,8 @@ KLINE_COLUMNS = [
     "turnover",
 ]
 
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -130,6 +133,57 @@ def _eastmoney_session() -> requests.Session:
     session.headers.update(REQUEST_HEADERS)
     session.trust_env = os.environ.get("EASTMONEY_USE_PROXY", "0") == "1"
     return session
+
+
+def _tencent_quote_symbol(code: str) -> str:
+    normalized = str(code).zfill(6)
+    if normalized.startswith(("5", "6", "9")):
+        return f"sh{normalized}"
+    if normalized.startswith(("4", "8")):
+        return f"bj{normalized}"
+    return f"sz{normalized}"
+
+
+def parse_tencent_quote_payload(payload: str) -> pd.DataFrame:
+    """Parse Tencent quote records into current price, prior close and open price."""
+    records: list[dict[str, object]] = []
+    for _, code, body in re.findall(r'v_([a-z]{2})(\d{6})="([^"]*)";', payload):
+        fields = body.split("~")
+        if len(fields) < 31:
+            continue
+        open_price = pd.to_numeric(fields[5], errors="coerce")
+        previous_close = pd.to_numeric(fields[4], errors="coerce")
+        last_price = pd.to_numeric(fields[3], errors="coerce")
+        records.append(
+            {
+                "code": code,
+                "name": fields[1],
+                "last_price": float(last_price) if pd.notna(last_price) else float("nan"),
+                "previous_close": float(previous_close) if pd.notna(previous_close) else float("nan"),
+                "open_price": float(open_price) if pd.notna(open_price) else float("nan"),
+                "quote_timestamp": fields[30],
+            }
+        )
+    return pd.DataFrame(records, columns=["code", "name", "last_price", "previous_close", "open_price", "quote_timestamp"])
+
+
+def fetch_tencent_open_prices(codes: Iterable[str], batch_size: int = 50) -> pd.DataFrame:
+    """Fetch today's opening prices for A-shares from Tencent's quote endpoint."""
+    normalised_codes = [str(code).zfill(6) for code in codes]
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    frames: list[pd.DataFrame] = []
+    for offset in range(0, len(normalised_codes), batch_size):
+        symbols = ",".join(_tencent_quote_symbol(code) for code in normalised_codes[offset : offset + batch_size])
+        response = requests.get(TENCENT_QUOTE_URL + symbols, headers=REQUEST_HEADERS, timeout=15)
+        response.raise_for_status()
+        frame = parse_tencent_quote_payload(response.content.decode("gbk", errors="replace"))
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["code", "name", "last_price", "previous_close", "open_price", "quote_timestamp"])
+    result = pd.concat(frames, ignore_index=True)
+    return result.drop_duplicates(subset=["code"], keep="last").reset_index(drop=True)
 
 
 def _request_eastmoney_json(url: str, params: dict) -> dict:
@@ -385,7 +439,18 @@ def fetch_one_stock_history(
     if source == "tencent":
         df = fetch_one_stock_history_tx(code, start_date, end_date, adjust)
     elif source == "eastmoney":
-        df = _fetch_one_stock_history_eastmoney(code, start_date, end_date, adjust)
+        # Eastmoney can occasionally close a long sequence of history requests
+        # without sending a response.  An explicit Eastmoney preference should
+        # not make an otherwise safe incremental update fail for every symbol.
+        try:
+            df = _fetch_one_stock_history_eastmoney(code, start_date, end_date, adjust)
+        except Exception as exc:
+            LOGGER.info(
+                "Eastmoney history failed for %s; falling back to Tencent. Reason: %s",
+                code,
+                exc,
+            )
+            df = fetch_one_stock_history_tx(code, start_date, end_date, adjust)
     elif _EASTMONEY_HISTORY_DISABLED:
         df = fetch_one_stock_history_tx(code, start_date, end_date, adjust)
     else:

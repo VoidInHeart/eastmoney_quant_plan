@@ -13,6 +13,7 @@
 - 已冻结 `baseline_weekly_v1`，后续研究应与该基线比较，而不是回头按测试期结果调参。
 - 已新增严格订单状态机；它会将不可交易订单挂起或取消，并只对实际成交计费，独立结果不覆盖基线。
 - E0～E3 消融已在完整停复牌数据下运行；低波动/反转虽在验证期表现较好，但在后续已观察研究期均未维持正超额，当前不推进为 V2 策略。
+- 已实现最多 10 只、允许留现金、日频风险减仓的自适应小组合候选；它在 2026 YTD 表现较好，但训练、验证与较长已观察期均相对跑输，**未通过验证且不替换基线**。
 
 ## 策略概览
 
@@ -39,6 +40,18 @@ score = 0.30 × 动量(120, 跳过最近20日)
 - 成本模型包含双边佣金与滑点、卖出印花税。参数见 `eastmoney_quant/config.py`。
 
 等权重是目前的基线选择。此前的排名倾斜和逆波动权重没有改善成本后表现，且会带来额外换手；在未证明稳定选股信号前，不继续为权重复杂化调参。
+
+### 自适应小组合候选（研究专用）
+
+该候选针对“最多持有 5～10 只股票”的账户约束设计，独立于默认 Top20 基线：每日收盘计算广度、排名和回撤，周频进行常规换仓；日频操作只允许在“20 日回撤 ≤ -8%、排名恶化”连续出现时减半，不会因为下跌加仓。它根据趋势广度使用 10 / 8 / 5 只股票与 100% / 75% / 50% 的目标仓位，对单票设置 12.5% 上限，新入选股票只先建半仓。
+
+该规则尚未通过跨期验证，只能用于研究，不应输出为实际交易指令。使用本地缓存复现单段检验：
+
+```powershell
+& $quantPython scripts/adaptive_candidate_validation.py --start-date 2026-01-05 --end-date 2026-07-31 --tag adaptive_candidate_ytd
+```
+
+更多规则、四段验证结果与否定结论见 [策略验证报告](docs/策略验证报告.md#510-只自适应候选研究专用未替换基线)。
 
 ## 数据与 AKShare 元数据
 
@@ -81,14 +94,23 @@ python update_metadata.py --industry-codes 002848 600777 --share-codes 002848 60
 
 ## 环境安装
 
-推荐使用项目的 Conda 环境：
+在 Windows 上，项目的标准解释器是 `D:\Anaconda\envs\quant_plan\python.exe`。运行脚本、测试和安装依赖时都应显式使用它，避免误用系统全局 Python：
+
+```powershell
+$quantPython = 'D:\Anaconda\envs\quant_plan\python.exe'
+& $quantPython -m pip install -r requirements.txt
+& $quantPython -m pytest -q
+& $quantPython update_data.py --dry-run
+```
+
+也可以先激活同一 Conda 环境，再使用文档中的 `python` 简写：
 
 ```powershell
 conda activate quant_plan
 python -m pip install -r requirements.txt
 ```
 
-若未将 Conda 加入命令行路径，也可以直接使用：
+若未将 Conda 加入命令行路径，继续使用上面的 `$quantPython` 变量；等价的单条命令为：
 
 ```powershell
 D:\Anaconda\envs\quant_plan\python.exe -m pip install -r requirements.txt
@@ -153,6 +175,32 @@ python update_data.py --lookback-days 30
 python predict.py
 ```
 
+### 空仓首次建仓（20 万元）
+
+`update_data.py` 默认只拉取到最近一个已收盘的 A 股交易日（15:30 前会停在前一交易日；周末和节假日按交易日历回退）。本次从空仓建仓时，先在收盘后运行更新：
+
+```bash
+python update_data.py
+```
+
+更新完成后会生成 `data/result/open_prices_template.csv`。在下一个交易日开盘后，将其中每只股票的 `open_price` 填入实际开盘价，再生成订单：
+
+```bash
+python predict.py --orders-only --open-prices-file data/result/open_prices_template.csv
+```
+
+如果腾讯实时行情接口可用，可直接拉取今天的开盘价并生成订单：
+
+```bash
+python predict.py --orders-only --fetch-live-opens
+```
+
+首次建仓的三步前端位于 `display/trading.html`：`#prescreen` 查看每日 Top20 预筛选，`#opening-prices` 录入或核对开盘价并下载订单，`#holdings` 手动录入当前价查看浮动盈亏。实时开盘价、订单和浏览器内录入的数据均保留来源时间或本地浏览器状态，执行前仍应以券商行情和委托回报为准。
+
+订单写入 `data/result/buy_recommendations.csv`，包含建议限价、整手买入数量、预计金额、佣金和剩余额度。首次建仓总资产默认 200,000 元，按入选股票等额分配，不向用户显示权重。名单会按市场广度在 5 / 6 / 8 / 10 只间切换：趋势广度低于 45% 时为 5 只，45%--60% 为 6 只，60%--70% 为 8 只，只有不低于 70% 才扩至 10 只。
+
+默认限价规则为 `min(开盘价 × 1.003, 前收 × 1.03)`，并向下取到 0.01 元价格档；数量按 100 股整手、预留最低 5 元佣金后向下取整。该限价是机械的风险保护，不保证成交；此流程只适用于空仓首次建仓，后续调仓还需要已有持仓与可用现金数据。
+
 仅跟踪已记录预测的后续表现：
 
 ```bash
@@ -169,6 +217,8 @@ python predict.py --track-only
 - `data/result/backtest_nav.csv`、`benchmark_nav.csv`：策略与基准净值；
 - `data/result/trades.csv`：调仓、换手与成本；
 - `data/result/latest_portfolio.csv`：最新建议组合；
+- `data/result/open_prices_template.csv`、`buy_recommendations.csv`：空仓首次建仓的开盘价输入模板与整手限价订单；
+- `data/result/daily_prescreen.csv`、`live_open_prices.csv`：每日 Top20 候选池与腾讯实时开盘价快照；
 - `data/result/prediction_tracking.csv`：历史建议的跟踪收益；
 - `data/result/baseline_*.csv`：冻结基线快照；
 - `data/result/data_integrity_checks.csv`：数据完整性检查；
@@ -176,6 +226,7 @@ python predict.py --track-only
 - `data/result/active_return_attribution.csv`：主动收益归因。
 - `data/result/execution_*.csv`：严格订单状态机的可成交性检查；
 - `data/result/factor_ablation_*.csv`：预注册 E0～E3 消融实验与训练期 RankIC 结果。
+- `data/result/adaptive_candidate_*.csv/json`：5～10 只自适应候选的净值、交易、目标与汇总（研究专用，未通过验证）。
 
 ## 已知限制与下一步
 
@@ -183,6 +234,7 @@ python predict.py --track-only
 - 严格执行引擎已实现“挂起、重试、取消和实际成交计费”，但停复牌缓存目前只覆盖抽样日期；在补齐全历史事件前，它只能用于发现执行风险，不能替代完整实盘成交模型。
 - 退市清单只能检查现有样本的日期边界，不能替代逐日历史全市场股票池；幸存者偏差尚未完全消除。
 - 当前因子在完整诊断中没有显示出稳定、可交易的样本外 Alpha。E0～E3 的验证期优势均未延续到后续已观察研究期；下一步应补齐历史股票池和剩余股本事件，再使用新的未观察数据做滚动 walk-forward 研究。
+- 自适应小组合候选同样没有通过训练、验证和较长已观察期；不能因为 2026 YTD 单段较好而启用，必须等待新的未观察数据再作检验。
 - 在此之前不启动深度学习或 GPU 训练；复杂模型不能修复数据泄漏、因子方向错误或成交可行性缺失。
 
 ## 项目结构
