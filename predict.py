@@ -10,6 +10,7 @@ from eastmoney_quant import config
 from eastmoney_quant.data_fetch import fetch_tencent_open_prices
 from eastmoney_quant.orders import (
     build_buy_recommendations,
+    build_exposure_reduction_recommendations,
     build_initial_buy_recommendations_from_prescreen,
     load_open_prices,
     normalise_open_prices,
@@ -40,6 +41,24 @@ def parse_args() -> argparse.Namespace:
         "--fetch-live-opens",
         action="store_true",
         help="fetch opening prices from Tencent's live quote endpoint instead of reading a CSV",
+    )
+    parser.add_argument(
+        "--reduce-exposure",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help="build live sell recommendations from assumed filled orders, e.g. 0.50",
+    )
+    parser.add_argument(
+        "--sell-today-fraction",
+        type=float,
+        default=1.0,
+        metavar="FRACTION",
+        help="fraction of the required exposure reduction to sell today, e.g. 0.40",
+    )
+    parser.add_argument(
+        "--holdings-file",
+        help="CSV of actual broker holdings with code,quantity (and optional name); overrides assumed initial fills",
     )
     parser.add_argument(
         "--open-price",
@@ -92,6 +111,34 @@ def _fetch_live_open_prices(candidates: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+    if args.reduce_exposure is not None:
+        if args.orders_only:
+            raise ValueError("--reduce-exposure cannot be combined with --orders-only")
+        if args.holdings_file:
+            holdings_path = Path(args.holdings_file)
+            if not holdings_path.exists():
+                raise FileNotFoundError(f"holdings file not found: {holdings_path}")
+            holdings = pd.read_csv(holdings_path, dtype={"code": str})
+            position_assumption = f"actual holdings loaded from {holdings_path}"
+        elif not config.BUY_RECOMMENDATION_PATH.exists():
+            raise FileNotFoundError("buy recommendations not found; import actual holdings before reducing exposure")
+        else:
+            holdings = pd.read_csv(config.BUY_RECOMMENDATION_PATH, dtype={"code": str})
+            position_assumption = "buy_recommendations assumed fully filled; replace with broker fills if different"
+        quotes = fetch_tencent_open_prices(holdings["code"])
+        reduction = build_exposure_reduction_recommendations(
+            holdings,
+            quotes,
+            total_assets=args.total_assets,
+            target_exposure=args.reduce_exposure,
+            sell_today_fraction=args.sell_today_fraction,
+        )
+        reduction["position_assumption"] = position_assumption
+        reduction.to_csv(config.EXPOSURE_REDUCTION_PATH, index=False, encoding="utf-8-sig")
+        refresh_dashboard_data()
+        print(f"Saved exposure-reduction recommendations: {config.EXPOSURE_REDUCTION_PATH}")
+        print(reduction.to_string(index=False))
+        return
     if args.orders_only:
         if args.track_only:
             raise ValueError("--orders-only cannot be combined with --track-only")

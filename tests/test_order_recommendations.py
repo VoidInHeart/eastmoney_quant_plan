@@ -4,6 +4,7 @@ import pytest
 from eastmoney_quant.data_fetch import parse_tencent_quote_payload
 from eastmoney_quant.orders import (
     build_buy_recommendations,
+    build_exposure_reduction_recommendations,
     build_initial_buy_recommendations_from_prescreen,
     build_open_price_template,
 )
@@ -166,3 +167,67 @@ def test_tencent_quote_parser_exposes_today_open_and_previous_close():
             "quote_timestamp": "20260803101537",
         }
     ]
+
+
+def test_exposure_reduction_keeps_market_value_at_or_below_target():
+    holdings = pd.DataFrame(
+        {
+            "code": ["600177", "601838", "000429", "601988", "001872"],
+            "name": ["A", "B", "C", "D", "E"],
+            "quantity": [5100, 2100, 2700, 6600, 1800],
+        }
+    )
+    quotes = pd.DataFrame(
+        {
+            "code": ["600177", "601838", "000429", "601988", "001872"],
+            "last_price": [7.68, 18.16, 14.55, 5.84, 21.81],
+            "quote_timestamp": ["20260804101310"] * 5,
+        }
+    )
+
+    orders = build_exposure_reduction_recommendations(holdings, quotes, total_assets=200_000, target_exposure=0.5)
+
+    assert orders["sell_quantity"].tolist() == [2500, 1000, 1300, 3200, 900]
+    assert (orders["sell_quantity"] % 100).eq(0).all()
+    assert orders["target_remaining_value"].sum() <= 100_000
+
+
+def test_exposure_reduction_can_be_phased_without_changing_the_final_target():
+    holdings = pd.DataFrame(
+        {
+            "code": ["600177", "601838", "000429", "601988", "001872"],
+            "name": ["A", "B", "C", "D", "E"],
+            "quantity": [5100, 2100, 2700, 6600, 1800],
+        }
+    )
+    quotes = pd.DataFrame(
+        {
+            "code": ["600177", "601838", "000429", "601988", "001872"],
+            "last_price": [7.68, 18.16, 14.55, 5.84, 21.81],
+        }
+    )
+
+    orders = build_exposure_reduction_recommendations(
+        holdings,
+        quotes,
+        total_assets=200_000,
+        target_exposure=0.5,
+        sell_today_fraction=0.4,
+    )
+
+    assert orders["sell_quantity"].tolist() == [1000, 400, 500, 1300, 400]
+    assert orders["remaining_sell_quantity"].tolist() == [1500, 600, 800, 1900, 500]
+    assert orders["planned_total_sell_quantity"].tolist() == [2500, 1000, 1300, 3200, 900]
+    assert orders["target_remaining_value"].sum() <= 100_000
+
+
+def test_exposure_reduction_accepts_actual_holdings_without_a_name_column():
+    orders = build_exposure_reduction_recommendations(
+        pd.DataFrame({"code": ["000001"], "quantity": [2000]}),
+        pd.DataFrame({"code": ["000001"], "last_price": [100.0]}),
+        total_assets=200_000,
+        target_exposure=0.5,
+    )
+
+    assert orders.loc[0, "name"] == ""
+    assert orders.loc[0, "sell_quantity"] == 1000

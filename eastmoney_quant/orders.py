@@ -223,6 +223,122 @@ def build_initial_buy_recommendations_from_prescreen(
     return orders
 
 
+def build_exposure_reduction_recommendations(
+    holdings: pd.DataFrame,
+    quotes: pd.DataFrame,
+    total_assets: float = config.ORDER_TOTAL_ASSETS,
+    target_exposure: float = 0.50,
+    sell_today_fraction: float = 1.0,
+    board_lot: int = config.ORDER_BOARD_LOT,
+    commission_rate: float = config.COMMISSION_RATE,
+    minimum_commission: float = config.ORDER_MIN_COMMISSION,
+    stamp_tax_rate: float = config.STAMP_TAX_RATE,
+) -> pd.DataFrame:
+    """Generate proportional, board-lot sell orders toward a target exposure.
+
+    The function assumes the supplied ``holdings`` quantities are actual filled
+    positions.  ``sell_today_fraction`` lets an operator phase the reduction:
+    the final target is still calculated from ``target_exposure``, while the
+    returned order quantity only includes that fraction of the required sale.
+    """
+    if not 0 < target_exposure < 1:
+        raise ValueError("target_exposure must be between 0 and 1")
+    if not 0 < sell_today_fraction <= 1:
+        raise ValueError("sell_today_fraction must be in (0, 1]")
+    if holdings.empty or "code" not in holdings or "quantity" not in holdings:
+        raise ValueError("holdings must contain code and quantity")
+    if "last_price" not in quotes:
+        raise ValueError("quotes must contain last_price")
+
+    positions = holdings.copy()
+    positions["code"] = _normalise_code(positions["code"])
+    if "name" not in positions:
+        positions["name"] = ""
+    positions["quantity"] = pd.to_numeric(positions["quantity"], errors="coerce").fillna(0).astype(int)
+    positions = positions[positions["quantity"] > 0].drop_duplicates(subset=["code"], keep="first")
+    live = quotes.copy()
+    live["code"] = _normalise_code(live["code"])
+    live["last_price"] = pd.to_numeric(live["last_price"], errors="coerce")
+    positions = positions.merge(live, on="code", how="left", validate="one_to_one", suffixes=("", "_quote"))
+    if positions["last_price"].isna().any() or positions["last_price"].le(0).any():
+        missing = positions.loc[positions["last_price"].isna() | positions["last_price"].le(0), "code"].tolist()
+        raise ValueError(f"live price unavailable for: {', '.join(missing)}")
+
+    positions["current_value"] = positions["quantity"] * positions["last_price"]
+    current_value = float(positions["current_value"].sum())
+    target_value = float(total_assets * target_exposure)
+    if current_value <= target_value:
+        return pd.DataFrame(columns=["code", "side", "quantity", "sell_limit_price"])
+
+    ratio = target_value / current_value
+    positions["target_remaining_quantity"] = (
+        (positions["quantity"] * ratio / board_lot).round().clip(lower=0).astype(int) * board_lot
+    ).clip(upper=positions["quantity"])
+    positions["target_remaining_value"] = positions["target_remaining_quantity"] * positions["last_price"]
+
+    # Rounding can leave exposure above the cap.  Remove one lot at a time,
+    # taking it from the row with the largest excess over its proportional goal.
+    while positions["target_remaining_value"].sum() > target_value + 1e-9:
+        candidates = positions[positions["target_remaining_quantity"] >= board_lot].copy()
+        if candidates.empty:
+            break
+        candidates["excess"] = candidates["target_remaining_value"] - positions.loc[candidates.index, "current_value"] * ratio
+        index = candidates.sort_values(["excess", "last_price", "code"], ascending=[False, False, True]).index[0]
+        positions.loc[index, "target_remaining_quantity"] -= board_lot
+        positions.loc[index, "target_remaining_value"] = (
+            positions.loc[index, "target_remaining_quantity"] * positions.loc[index, "last_price"]
+        )
+
+    positions["planned_total_sell_quantity"] = positions["quantity"] - positions["target_remaining_quantity"]
+    positions["sell_quantity"] = (
+        (positions["planned_total_sell_quantity"] * sell_today_fraction / board_lot).round().astype(int) * board_lot
+    ).clip(upper=positions["planned_total_sell_quantity"])
+    positions["remaining_sell_quantity"] = positions["planned_total_sell_quantity"] - positions["sell_quantity"]
+    positions["post_trade_quantity"] = positions["quantity"] - positions["sell_quantity"]
+    positions["post_trade_value"] = positions["post_trade_quantity"] * positions["last_price"]
+    positions = positions[positions["sell_quantity"] > 0].copy()
+    positions["sell_limit_price"] = positions["last_price"].map(lambda value: _floor_to_tick(float(value), config.ORDER_PRICE_TICK))
+    positions["estimated_notional"] = positions["sell_quantity"] * positions["sell_limit_price"]
+    positions["estimated_commission"] = (positions["estimated_notional"] * commission_rate).clip(lower=minimum_commission)
+    positions["estimated_stamp_tax"] = positions["estimated_notional"] * stamp_tax_rate
+    positions["estimated_net_proceeds"] = (
+        positions["estimated_notional"] - positions["estimated_commission"] - positions["estimated_stamp_tax"]
+    )
+    positions["target_exposure"] = target_exposure
+    positions["target_market_value"] = target_value
+    positions["today_sell_fraction"] = sell_today_fraction
+    if "quote_timestamp_quote" in positions:
+        positions["quote_timestamp"] = positions["quote_timestamp_quote"]
+    elif "quote_timestamp" not in positions:
+        positions["quote_timestamp"] = ""
+    columns = [
+        "code",
+        "name",
+        "side",
+        "quantity",
+        "last_price",
+        "sell_limit_price",
+        "sell_quantity",
+        "remaining_sell_quantity",
+        "planned_total_sell_quantity",
+        "post_trade_quantity",
+        "post_trade_value",
+        "target_remaining_quantity",
+        "current_value",
+        "target_remaining_value",
+        "estimated_notional",
+        "estimated_commission",
+        "estimated_stamp_tax",
+        "estimated_net_proceeds",
+        "target_exposure",
+        "target_market_value",
+        "today_sell_fraction",
+        "quote_timestamp",
+    ]
+    positions["side"] = "sell"
+    return positions[[column for column in columns if column in positions]].reset_index(drop=True)
+
+
 def load_open_prices(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"open-price file not found: {path}")

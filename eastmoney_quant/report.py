@@ -156,6 +156,7 @@ def refresh_dashboard_data() -> None:
         "prescreen": _csv_records(config.PRESCREEN_CANDIDATES_PATH, limit=config.TOP_N),
         "live_open_prices": _csv_records(config.LIVE_OPEN_PRICE_PATH, limit=config.TOP_N),
         "buy_recommendations": _csv_records(config.BUY_RECOMMENDATION_PATH, limit=config.LIVE_MAX_HOLDINGS),
+        "exposure_reduction": _csv_records(config.EXPOSURE_REDUCTION_PATH, limit=config.LIVE_MAX_HOLDINGS),
         "tracking": _csv_records(config.PREDICTION_TRACKING_PATH, limit=60),
     }
     config.DISPLAY_DIR.mkdir(parents=True, exist_ok=True)
